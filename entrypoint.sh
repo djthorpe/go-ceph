@@ -20,6 +20,7 @@ CEPH_FILE_CONFIG="ceph.conf"
 CEPH_FILE_KEYRING_CLIENT="client.keyring"
 CEPH_FILE_KEYRING_MONITOR="mon.keyring"
 CEPH_FILE_KEYRING_MANAGER="mgr.keyring"
+CEPH_FILE_KEYRING_OSD="osd.keyring"
 CEPH_FILE_MONITOR_MAP="monmap"
 
 # Names of the keyrings
@@ -54,6 +55,9 @@ usage() {
     echo
     echo " ${SCRIPT_NAME} -f|--force -h|--hostname <mon-hostname> -c|--cluster <name> create-manager-path"
     echo "   Create manager path for files. Force re-creation if the force flag is set"
+    echo
+    echo " ${SCRIPT_NAME} -f|--force -h|--hostname <mon-hostname> -c|--cluster <name> create-osd-path"
+    echo "   Create osd path for files. Force re-creation if the force flag is set"
     echo
     echo " ${SCRIPT_NAME} -h|--hostname <mon-hostname> monitor"
     echo "   Run previously bootstrapped monitor"
@@ -99,6 +103,7 @@ init-vars() {
     CEPH_KEYRING_CLIENT="${CEPH_PATH_ETC}/${CEPH_FILE_KEYRING_CLIENT}"
     CEPH_KEYRING_MONITOR="${CEPH_PATH_ETC}/${CEPH_FILE_KEYRING_MONITOR}"
     CEPH_KEYRING_MANAGER="${CEPH_PATH_ETC}/${CEPH_FILE_KEYRING_MANAGER}"
+    CEPH_KEYRING_OSD="${CEPH_PATH_ETC}/${CEPH_FILE_KEYRING_OSD}"
     CEPH_MONITOR_MAP="${CEPH_PATH_ETC}/${CEPH_FILE_MONITOR_MAP}"
     CEPH_CONFIG="${CEPH_PATH_ETC}/${CEPH_FILE_CONFIG}"
 
@@ -137,6 +142,7 @@ init-vars() {
     # Set monitor and manager path
     CEPH_MONITOR_PATH="${CEPH_PATH_VAR}/mon/${CEPH_CLUSTER_NAME}-${CEPH_HOSTNAME}"
     CEPH_MANAGER_PATH="${CEPH_PATH_VAR}/mgr/${CEPH_CLUSTER_NAME}-${CEPH_HOSTNAME}"
+    CEPH_OSD_PATH="${CEPH_PATH_VAR}/osd/${CEPH_CLUSTER_NAME}-${CEPH_HOSTNAME}"
 }
 
 ###############################################################################
@@ -177,9 +183,11 @@ bootstrap-mon() {
     create-client-admin-keyring || exit 1
     create-monitor-keyring || exit 1
     create-manager-keyring || exit 1
+    create-osd-keyring || exit 1
     create-monitor-map || exit 1
     create-monitor-path || exit 1
     create-manager-path || exit 1
+    create-osd-path || exit 1
     create-monitor-config || exit 1
 
     # Return success
@@ -277,7 +285,7 @@ create-manager-keyring() {
 ###############################################################################
 
 create-osd-keyring() {
-    CEPH_KEY_NAME="client.bootstrap-osd"
+    CEPH_KEY_NAME="osd.${CEPH_HOSTNAME}"
 
     # Check parameters
     if [ -z "${CEPH_HOSTNAME}" ]; then
@@ -287,23 +295,22 @@ create-osd-keyring() {
 
     # Verbose logging
     echo
-    echo "create-monitor-keyring"
-    echo "  keyring: ${CEPH_KEYRING_MONITOR}"
+    echo "create-osd-keyring"
+    echo "  keyring: ${CEPH_KEYRING_OSD}"
     echo "  key: ${CEPH_KEY_NAME}"
     echo
 
-    if [ ! -f "${CEPH_KEYRING_MONITOR}" ] || [ ! -z "${CEPH_FORCE}" ]; then
-        ${CEPH_AUTHTOOL_BIN} ${CEPH_KEYRING_MONITOR} --create-keyring --gen-key -n "${CEPH_KEY_NAME}" || exit 1
+    if [ ! -f "${CEPH_KEYRING_OSD}" ] || [ ! -z "${CEPH_FORCE}" ]; then
+        ${CEPH_AUTHTOOL_BIN} ${CEPH_KEYRING_OSD} --create-keyring --gen-key -n "${CEPH_KEY_NAME}"  \
+          --cap mon 'allow *' --cap mgr 'allow *' || exit 1
     else 
-        echo "  => monitor key already exists, not changing. Use --force to create a new one"
+        echo "  => osd key already exists, not changing. Use --force to create a new one"
     fi
 
     # Import client admin key
-    import-client-admin-keyring "${CEPH_KEYRING_MONITOR}" "${CEPH_KEYRING_CLIENT}" "${CEPH_KEY_CLIENT_ADMIN}" || exit 1
-
-    # Check the owner and permissions on the keyring
-    chown ceph:ceph "${CEPH_KEYRING_MONITOR}" || exit 1
-    chmod 660 "${CEPH_KEYRING_MONITOR}" || exit 1
+    if [ -f "${CEPH_KEYRING_MANAGER}" ]; then
+        import-client-admin-keyring "${CEPH_KEYRING_MONITOR}" "${CEPH_KEYRING_OSD}" "${CEPH_KEY_NAME}" || exit 1
+    fi
 
     # Return success
     echo
@@ -420,7 +427,6 @@ create-monitor-path() {
     echo
 }
 
-
 ###############################################################################
 
 create-manager-path() {
@@ -460,6 +466,44 @@ create-manager-path() {
     echo
 }
 
+###############################################################################
+
+create-osd-path() {
+    # Check parameters
+    if [ -z "${CEPH_HOSTNAME}" ]; then
+        echo "Missing --hostname"
+        exit 1
+    fi
+    if [ -z "${CEPH_CLUSTER_NAME}" ]; then
+        echo "Missing --cluster"
+        exit 1
+    fi
+
+    # Verbose logging
+    echo
+    echo "create-osd-path"
+    echo "  hostname: ${CEPH_HOSTNAME}"
+    echo "  cluster: ${CEPH_CLUSTER_NAME}"
+    echo "  path: ${CEPH_OSD_PATH}"
+    echo
+
+    # Remove existing if forced
+    if [ ! -z "${CEPH_FORCE}" ] && [ -d "${CEPH_OSD_PATH}" ]; then
+        rm -rf "${CEPH_OSD_PATH}" || exit 1
+    fi
+
+    # Create the osd path
+    if [ ! -d "${CEPH_OSD_PATH}" ]; then
+        mkdir -p "${CEPH_OSD_PATH}" || exit 1
+        chown ceph:ceph "${CEPH_OSD_PATH}" || exit 1
+        chmod 775 "${CEPH_OSD_PATH}" || exit 1
+    else 
+        echo "  => osd path already exists, not changing. Use --force to create a new one"
+    fi
+
+    # Return success
+    echo
+}
 
 ###############################################################################
 
@@ -591,17 +635,24 @@ create-block-device() {
     echo "  type: ${CEPH_DEVICE_TYPE}"
     echo "  cluster: ${CEPH_CLUSTER_NAME}"
 
+    # Copy keyring file over to monitor path, makr readable by ceph
+    install -m 644 -o ceph -g ceph "${CEPH_KEYRING_OSD}" "${CEPH_OSD_PATH}/keyring" || exit 1
+
+    # Run tool
+    ceph-bluestore-tool \
+      prime-osd-dir --dev "${CEPH_PATH_DEVICE}" --path "${CEPH_OSD_PATH}" || exit 1
+
     # Create the block device
-    case "${CEPH_DEVICE_TYPE}" in
-    raw)
-        ${CEPH_VOLUMETOOL_BIN} --log-path "${CEPH_PATH_LOG}/${CEPH_CLUSTER_NAME}.log" --cluster "${CEPH_CLUSTER_NAME}" \
-          raw prepare \
-          --bluestore --data "${CEPH_PATH_DEVICE}" || exit 1
-        ;;
-     *)
-       echo "Unsupported device type: ${CEPH_DEVICE_TYPE}"
-       ;;
-    esac
+    #case "${CEPH_DEVICE_TYPE}" in
+    #raw)
+    #    ${CEPH_VOLUMETOOL_BIN} --log-path "${CEPH_PATH_LOG}/${CEPH_CLUSTER_NAME}.log" --cluster "${CEPH_CLUSTER_NAME}" \
+    #      raw prepare \
+    #      --bluestore --data "${CEPH_PATH_DEVICE}" || exit 1
+    #    ;;
+    # *)
+    #   echo "Unsupported device type: ${CEPH_DEVICE_TYPE}"
+    #   ;;
+    #esac
 }
 
 
